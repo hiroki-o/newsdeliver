@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright (C) 2005 by Matt Roper <matt@mattrope.com>
 #
@@ -17,7 +17,7 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 # 2013 modified by Hiroki Omae <pigeon6@gmail.com>
-# for Python 3
+# for Python 3 and NNTP_SSL support
 
 """
 newsdeliver -- A configurable news to email gateway.
@@ -40,6 +40,7 @@ NNTPSERVER   = ""
 NNTPPORT     = 119
 NNTPUSER     = None
 NNTPPASS     = None
+NNTPSSL      = False
 EMAILTO      = "" 
 SMTPSERVER   = "" 
 SMTPPORT     = "" 
@@ -494,7 +495,10 @@ def check_group(con, grp, lastseen, addr, filter, subjprefix, binmode,
     # If we're supposed to upload messages from this group to another news
     # server, open the NNTP connection to that server now.
     if uploadto != "":
-        toserv = nntplib.NNTP_SSL(uploadto)
+        if NNTPSSL:
+            toserv = nntplib.NNTP_SSL(uploadto)
+        else:
+            toserv = nntplib.NNTP(uploadto)
     else:
         toserv = None
     
@@ -736,9 +740,7 @@ regular newsreader.""" % (subject, msgid, filename)
         else:
             debug("   -> Trying to send email (length=%d)." % len(msg))
             mailer = smtplib.SMTP(SMTPSERVER, SMTPPORT)
-            mailer.set_debuglevel(1)
-
-            #smtp.ehlo()
+            #mailer.set_debuglevel(1)
 
             if SMTPTLS:
                 mailer.starttls()
@@ -919,8 +921,12 @@ def get_connection():
     
     try:
         set_timeout(TIMEOUT, "establish connection")
-        ret = nntplib.NNTP_SSL(NNTPSERVER, port=NNTPPORT,
-                           user=NNTPUSER, password=NNTPPASS)
+        if NNTPSSL:
+            ret = nntplib.NNTP_SSL(NNTPSERVER, port=NNTPPORT,
+                               user=NNTPUSER, password=NNTPPASS)
+        else:
+            ret = nntplib.NNTP(NNTPSERVER, port=NNTPPORT,
+                               user=NNTPUSER, password=NNTPPASS)
         clear_timeout()
         return ret
     except NDTimeout:
@@ -965,6 +971,9 @@ NNTPPORT = 119
 
 # NNTP password to login with; uncomment and change if required by your server
 #NNTPPASS = 'bar'
+
+# NNTP uses SSL
+#NNTPSSL = True
 
 # Email address to deliver news articles to
 EMAILTO = '%s@%s'
