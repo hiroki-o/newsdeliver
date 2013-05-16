@@ -1,0 +1,111 @@
+1.4.1
+    - A TIMEOUT option has been added to the .newsdeliverrc file which allows
+      the user to specify their own timeouts for network operations.
+
+1.4.0
+    - NewsDeliver can now run in daemon mode and hold a persistent connection
+      to the server.
+    - Daemon will reload its group file if it receives a SIGHUP
+    - SIGTERM should be handled properly now
+    - Verbose output can now be logged to a file with the DEBUGFILE
+      config option
+    - Socket errors give a more general message instead of always saying
+      'timed out.'
+    - Fixed another error where a Python 'EOFError' would be displayed if
+      the NNTP server disconnected unexpectedly.  This is now handled
+      gracefully and displays an appropriate error message.
+
+1.3.5
+    - NNTPPORT option added to specify news server's port (defaults to 119)
+    - EOFError while reading article headers is now properly caught and
+      displays an appropriate message ("NNTP server closed connection while
+      reading headers.")
+    - New MAILERROR setting allows selection of behavior on SMTP errors:
+      "IGNORE" causes SMTP errors to be ignored (so that a single spam
+      message that gets rejected by SMTP-time mail servers doesn't clog
+      the NewsDeliver process) and "FAIL" (the default) terminates
+      immediately so that messages will not be lost.
+    - try/catch for SMTPAuthenticationError has been moved into an if
+      statement that will only be run if SMTP authentication is used.
+      This exception (and the smtplib.login() function itself) only appear
+      in Python 2.2 and above, so you must be using a relatively recent
+      version of Python in order to use the SMTP authentication features.
+      The missing exception should no longer cause problems for people
+      who are not using authentication, but are running an older version
+      of Python.
+
+1.3.4
+    - MAILCMD option allows use of external mail program
+      (e.g., /usr/lib/sendmail) instead of using SMTP directly.
+    - SMTPFROM global option and smtpfrom group option in
+      .newsdeliver.grp allow user to set the address that is used for
+      the 'MAIL From' line of the SMTP transaction
+
+1.3.3
+    - add support for SMTP authentication via SMTPUSER and SMTPPASS options
+      in ~/.newsdeliverrc
+    - fix a couple cases of "double unlocking" when an error occurs; this
+      wasn't really a problem, but it caused a warning about "lockfile
+      already gone"
+
+1.3.2
+    - supports uploading of messages to another NNTP server via
+      IHAVE
+    - Instances of %g in EXTRAHEADERS are replaced by the current newsgroup
+      name; useful when filtering messages that have been cross-posted to
+      multiple groups
+    - temporary support for --rcfile on command line; this is a temporary
+      hack to allow multiple servers; this will become unnecessary in the
+      next real release when the config file format is updated to accomodate
+      this
+    - SMTPPORT setting is now actually honored
+
+1.3.1
+    - fixed bug in 'listgrps' code that caused a crash while
+      listing the monitored groups
+
+1.3.0
+    - new .newsdeliver.grp file format
+    - subject prefix can be set on a per-group basis
+    - subject prefix can contain the string "%g" which will be
+      replaced by the newsgroup name
+    - cleaner code
+
+1.2.1
+    - NNTPUSER and NNTPPASS config variables can be set if the nntp
+      server requires users to login.
+    - Binary notifications now contain the Message-ID in the body
+      so that the user can find the message in their regular newsreader
+      easily.
+    - Fixed a bug that made the remgrp command stop working
+
+1.2.0
+    - Binary detection added (can ignore, notify, or send normally).
+      So far, only yEnc and uuEncode are detected.
+    - If newsdeliver dies during a run, messages already sent are no
+      longer forgotten and re-sent on the next run.
+    - 'catchup' command is no longer broken
+    - Added a 'list' command which displays a list of all groups being
+      monitored, along with their subject filter (if any).
+
+1.1.1
+    - more Python 1.5 fixes (exception names from nntplib)
+
+1.1.0
+    - added --verbose to display debugging info
+    - newsgroups can now have an associated subject line filter
+    - newsgroups can now be directed at a specific email address,
+      overriding the global default
+
+1.0.3
+    - Uses locking to make sure two processes don't try to run at once
+
+1.0.2
+    - Now works with Python 1.5
+
+1.0.1
+    - Fixed crash when a newsgroup's "last article number" jumps from 0
+      to some high (>1) number.
+
+1.0.0
+    - Initial release

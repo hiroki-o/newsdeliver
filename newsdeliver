@@ -1,0 +1,1308 @@
+#!/usr/bin/env python
+#
+# Copyright (C) 2005 by Matt Roper <matt@mattrope.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+
+"""
+newsdeliver -- A configurable news to email gateway.
+"""
+
+__author__  = "Matt Roper <matt@mattrope.com>"
+__version__ = "1.4"
+
+import os, sys, re, getopt, getpass, string, signal
+import socket, nntplib, smtplib
+import exceptions
+from time import localtime, strftime, sleep
+
+VALIDOPTS = {}
+
+# User settings initialized to nil.  Don't make changes to these here; instead
+# run the program with the --newconf option to generate a personal configuraion
+# file.
+NNTPSERVER   = ""
+NNTPPORT     = 119
+NNTPUSER     = None
+NNTPPASS     = None
+EMAILTO      = "" 
+SMTPSERVER   = "" 
+SMTPPORT     = "" 
+SMTPUSER     = None
+SMTPPASS     = None
+SMTPFROM     = None
+MAILCMD      = None
+SUBJPREFIX   = "" 
+BODYPREFIX   = "" 
+BODYSUFFIX   = "" 
+EXTRAHEADERS = []
+BINARIES     = "IGNORE"
+MAILERROR    = "FAIL"
+GRPFILE      = os.path.expanduser("~/.newsdeliver.grp")
+DAEMONSLEEP  = 60
+DEBUGFILE    = ""
+TIMEOUT      = 20
+
+VERBOSE = 0
+debugfp = None
+
+# Stores info about each subscribed group
+groups = {}
+
+# Was a SIGHUP encountered in daemon mode?  If so, we need to restart
+need_restart = 0
+
+# What operation is currently being performed (for timeout purposes)?
+current_operation = "unknown"
+
+def sigterm_handler(sig, frame):
+    writegroups()
+    debug("Caught SIGTERM.  Shutting down")
+    raise SystemExit()
+
+def sigalrm_handler(sig, event):
+    raise NDTimeout()
+
+def sighup_handler(sig, frame):
+    global need_restart
+    need_restart = 1
+
+def init_handlers():
+    """ Initializes command line option handler functions. """
+    
+    global VALIDOPTS
+    VALIDOPTS = [ 
+                    'help', 'newconf', 'addgrp=', 'remgrp=', 'catchup=',
+                    'verbose', 'filter=', 'setaddr=', 'list', 'subjprefix=',
+                    'rcfile=', 'daemon'
+                ]
+
+def main():
+    """ Program startup function.
+    
+        Read in command line options and arguments.  If there's more than one
+        option, show the usage information.  If there's no options, assume a
+        "check" command.  Otherwise, run the appropriate option handler
+        function.
+    """
+
+    global VERBOSE
+    global debugfp
+    global need_restart
+
+    init_handlers()
+    try:
+        optlist, args = getopt.getopt(sys.argv[1:], '', VALIDOPTS)
+    except getopt.error:
+        print "Error parsing command line parameters."
+        do_help()
+        sys.exit(1)
+
+    action = "check"        # default action
+    aparam = ""             # parameter associated with action
+
+    # Setup the timeout handler
+    signal.signal(signal.SIGALRM, sigalrm_handler)
+
+    for (option, param) in optlist:
+        if (option == "--help"):
+            do_help()
+            sys.exit(0)
+
+        if (option == "--verbose"):
+            VERBOSE = 1
+            if DEBUGFILE != "":
+                debugfp = open(os.path.expanduser(DEBUGFILE), "a")
+            else:
+                debugfp = sys.stdout
+            continue
+
+
+        # Figure out which action to perform
+        aparam = param
+        if (option == "--newconf"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "newconf"
+        elif (option == "--addgrp"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "addgrp"
+            readgroups(1)
+        elif (option == "--remgrp"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "remgrp"
+            readgroups()
+        elif (option == "--filter"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "filter"
+            readgroups()
+        elif (option == "--setaddr"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "setaddr"
+            readgroups()
+        elif (option == "--catchup"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(1)
+            action = "catchup"
+            readgroups()
+        elif (option == "--list"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(0)
+            action = "list"
+            readgroups()
+        elif (option == "--subjprefix"):
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(0)
+            action = "subjprefix"
+            readgroups()
+        elif option == "--daemon":
+            if action != "check":
+                print "Too many actions specified on command line"
+                do_help()
+                sys.exit(0)
+            action = "daemon"
+            signal.signal(signal.SIGHUP, sighup_handler)
+            signal.signal(signal.SIGTERM, sigterm_handler)
+            readgroups()
+        elif (option == "--rcfile"):
+            # Load an alternate config file; existing settings will remain the
+            # same if they are not overridden in the new rc file.
+            #
+            # This is a quick hack until I update the config file format to 
+            # support multiple servers and such.
+            if action != "check":
+                print "--rcfile should be the first option on the command line"
+                sys.exit(0)
+            try:
+                f = open(aparam)
+                exec(f)
+            except IOError:
+                print "Config file '%s' not found!" % aparam
+                sys.exit(0)
+        else:
+            print "Unrecognized option %s" % option
+            do_help()
+            sys.exit(0)
+
+    # Try to get a lock.  If there's another newsdeliver process
+    # running, just quit.
+    get_lock()
+
+    try:
+        # Now perform the appropriate action
+        debug("Action is '%s'" % action)
+        if (action == "check"):    readgroups(); do_check(args)
+        if (action == "newconf"):  do_newconf()
+        if (action == "addgrp"):   do_addgrp(aparam)
+        if (action == "remgrp"):   do_remgrp(aparam)
+        if (action == "catchup"):  do_catchup(aparam)
+        if (action == "filter"):   do_set("filter", aparam)
+        if (action == "setaddr"):  do_set("addr", aparam)
+        if (action == "list"):     do_listgrps()
+        if (action == "subjprefix"): do_set("subjprefix", aparam)
+        if (action == "daemon"):   do_daemon()
+    finally:
+        # Release the lock regardless of whether there was an error or
+        # not.
+        release_lock()
+    
+
+def do_help(dummy = ""):
+    """ Displays the program usage information. """
+    
+    prog = sys.argv[0]
+    prog = string.replace(prog,r"//",r"/")
+    print """    Usage:
+        %s
+        %s <grpname1> [ <grpname2> ... ]
+        %s [ --help ]
+        %s [ --newconf ]
+        %s [ --addgrp  <grpname> ]
+        %s [ --remgrp  <grpname> ]
+        %s [ --list ]
+        %s [ --filter  <grpname>=<subjectfilter> ]
+        %s [ --setaddr <grpname>=<emailaddr> ]
+        %s [ --subjprefix <grpname>=<subjectprefix> ]
+        %s [ --catchup <grpname> ]
+        %s [ --catchup all ]
+        %s [ --daemon ]
+""" % (prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog)
+
+
+def do_check(grps):
+    """ Checks for new articles.
+    
+        Parameters:
+            grps:  Array of names of newsgroups to check.  If empty, this
+                   function will check all newsgroups in the group list.
+    """
+
+    global groups
+
+    errormsg = ""       # Set on server errors
+
+    if (len(groups.keys()) == 0):
+        raise SystemExit("You are not monitoring any groups yet.")
+
+    # Try to get a lock and then connect to the news server.  If there's
+    # another newsdeliver process running, just quit.
+    con = get_connection()
+    
+    # If no group names were specified, check all groups.
+    if len(grps) == 0: grps = groups.keys()
+    
+    for g in grps:
+        debug("Checking %s; last message seen = %s" % (g, groups[g]["lastseen"]))
+
+        if not groups.has_key(g):
+            print "WARNING: '%s' is not being monitored yet." % g
+            continue
+
+        # Assume default parameters for this group initially
+        filter      = ""
+        addr        = EMAILTO
+        subjprefix  = SUBJPREFIX
+        binmode     = BINARIES
+        toserv      = ""
+        if SMTPFROM is not None:
+            smtpfrom = SMTPFROM
+        else:
+            smtpfrom = EMAILTO
+
+        # Figure out group-specific details (filter, address, etc.)
+        if groups[g].has_key("filter"):     filter     = groups[g]["filter"]
+        if groups[g].has_key("addr"):       addr       = groups[g]["addr"]
+        if groups[g].has_key("subjprefix"): subjprefix = groups[g]["subjprefix"]
+        if groups[g].has_key("binaries"):   binmode    = groups[g]["binaries"]
+        if groups[g].has_key("uploadto"):   toserv     = groups[g]["uploadto"]
+        if groups[g].has_key("smtpfrom"):   smtpfrom   = groups[g]["smtpfrom"]
+        
+        try:
+            groups[g]["lastseen"] = check_group(con, g, groups[g]["lastseen"], 
+                                                addr, filter, subjprefix, 
+                                                binmode, toserv, smtpfrom)
+            debug("Last message seen for group %s is now %s." %
+                    (g, groups[g]["lastseen"]))
+        except EOFError:
+            # NNTP server closed the connection for some reason...
+            raise NDLostNNTPConnection("NNTP server closed connection while checking group.")
+        except NDCriticalError, e:
+            # Something bad happened (probably with the SMTP server
+            # or the NNTP server).  We'll remember how many messages
+            # actually got sent and then skip the rest of the groups.
+            # This way, messages that got sent before the error
+            # won't be resent on the next run.
+            groups[g]["lastseen"] = e.lastsent
+            errormsg = e.msg
+            break
+
+    # Update group file on disk
+    writegroups()
+
+    # Now actually raise the system exit exception and quit
+    if errormsg != "":
+        raise SystemExit(errormsg)
+
+
+def do_daemon():
+    """ Spawns a daemon that periodically checks for new articles.  """
+
+    global groups
+    global need_restart
+
+    errormsg = ""       # Set on server errors
+
+    if (len(groups.keys()) == 0):
+        raise SystemExit("You are not monitoring any groups yet.")
+
+    # Try to get a lock and then connect to the news server.  If there's
+    # another newsdeliver process running, just quit.
+    con = get_connection()
+    
+    # Main daemon loop
+    while 1:
+        debug("Top of daemon loop")
+
+        # Did we get a SIGHUP?  If so, reread the group file
+        if need_restart:
+            debug("Rereading group file after a SIGHUP")
+            readgroups()
+            need_restart = 0
+        
+        # Temporarily ignore SIGHUP
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+        for g in groups.keys():
+            debug("Checking %s; last message seen = %s" % (g, groups[g]["lastseen"]))
+
+            # Assume default parameters for this group initially
+            filter      = ""
+            addr        = EMAILTO
+            subjprefix  = SUBJPREFIX
+            binmode     = BINARIES
+            toserv      = ""
+            if SMTPFROM is not None:
+                smtpfrom = SMTPFROM
+            else:
+                smtpfrom = EMAILTO
+
+            # Figure out group-specific details (filter, address, etc.)
+            if groups[g].has_key("filter"):     filter     = groups[g]["filter"]
+            if groups[g].has_key("addr"):       addr       = groups[g]["addr"]
+            if groups[g].has_key("subjprefix"): subjprefix = groups[g]["subjprefix"]
+            if groups[g].has_key("binaries"):   binmode    = groups[g]["binaries"]
+            if groups[g].has_key("uploadto"):   toserv     = groups[g]["uploadto"]
+            if groups[g].has_key("smtpfrom"):   smtpfrom   = groups[g]["smtpfrom"]
+            
+            try:
+                groups[g]["lastseen"] = check_group(con, g, groups[g]["lastseen"], 
+                                                    addr, filter, subjprefix, 
+                                                    binmode, toserv, smtpfrom)
+                debug("Last message seen for group %s is now %s." %
+                        (g, groups[g]["lastseen"]))
+            except EOFError:
+                debug("Lost NNTP connection")
+                con = None
+                while not con:
+                    debug("Attempting to re-establish connection to NNTP server")
+                    con = get_connection()
+                    if not con: sleep(DAEMONSLEEP)
+                break
+            except NDLostNNTPConnection:
+                debug("Lost NNTP connection")
+                con = None
+                while not con:
+                    debug("Attempting to re-establish connection to NNTP server")
+                    con = get_connection()
+                    if not con: sleep(DAEMONSLEEP)
+                break
+            except NDTimeout, e:
+                # Timed out while checking newsgroup
+                groups[g]["lastseen"] = e.lastsent
+                debug("Timed out on operation '%s' while checking group; sleeping" % e.msg)
+                break
+            except NDCriticalError_Single, e:
+                # Something bad happened (probably with the SMTP server
+                # or the NNTP server), but we're only going to terminate
+                # the current run; we'll wait until the next daemon
+                # wakeup and continue processing.
+                groups[g]["lastseen"] = e.lastsent
+                debug("Critical Error, sleeping: %s" % e.msg)
+                break
+            except NDCriticalError, e:
+                # Something bad happened (probably with the SMTP server
+                # or the NNTP server) and we need to completely shut
+                # down.  We'll remember how many messages actually got
+                # sent and then skip the rest of the groups.  This way,
+                # messages that got sent before the error won't be
+                # resent on the next run.
+                groups[g]["lastseen"] = e.lastsent
+                errormsg = e.msg
+                debug("Critical Error, shutting down: %s" % errormsg)
+                break
+
+        # Update group file on disk
+        writegroups()
+        
+        # Now listen for SIGHUP again
+        signal.signal(signal.SIGHUP, sighup_handler)
+
+
+        # If there was a critical error and we need to stop the daemon,
+        # break out of the daemon loop.
+        if errormsg != "":
+            break
+
+        # Sleep until next wakeup
+        try:
+            sleep(DAEMONSLEEP)
+        except KeyboardInterrupt:
+            debug("User interrupt detected.  Shutting down daemon.")
+            raise SystemExit
+
+    # Now actually raise the system exit exception and quit
+    if errormsg != "":
+        raise SystemExit(errormsg)
+    else:
+        raise SystemExit("EXITING WITHOUT ERROR; THIS SHOULDN'T HAPPEN!")
+
+
+def check_group(con, grp, lastseen, addr, filter, subjprefix, binmode,
+                uploadto, smtpfrom):
+    """ Emails all unseen news articles in a specific group to the user.
+    
+        Parameters:
+            con       : NNTP connection handle
+            grp       : newsgroup to check
+            lastseen  : last article # previously seen in this group
+            addr      : email address that messages in this group should be sent
+                        to; if this is empty, the default will be used
+            filter    : a subject line filter; only messages matching this
+                        filter will be emailed
+            subjprefix: string that should be prepended to mail copies of
+                        messages in this group
+            binmode   : binary handling behavior
+            uploadto  : news server that this message should be trasferred to
+                        (using the IHAVE command)
+            smtpfrom  : address to use as sender in SMTP transaction
+        
+        Returns:
+            Current last article number in group
+    """
+    
+    # Perform pattern replacement on the subject prefix string:
+    #    %g --> newsgroup name
+    # (maybe more later...)
+    subjprefix = re.sub(r"%g", grp, subjprefix)
+    
+    # If we're supposed to upload messages from this group to another news
+    # server, open the NNTP connection to that server now.
+    if uploadto != "":
+        toserv = nntplib.NNTP_SSL(uploadto)
+    else:
+        toserv = None
+    
+    # Get last article # from NNTP server
+    lastart = con.group(grp)[3]
+    debug("Server says last article is %s" % lastart)
+    
+    # Send all articles we haven't seen before
+    try:
+        for i in range(int(lastseen)+1, int(lastart) + 1):
+            debug(" -> Checking article %d" % i)
+            send_art(con, grp, str(i), addr, filter, subjprefix, binmode,
+                     toserv, smtpfrom)
+    except NDCriticalError, e:
+        e.lastsent = i-1
+        raise e
+    #except SystemExit, e:
+    #    raise NDCriticalError(e.args[0], i-1)
+    except KeyboardInterrupt:
+        raise NDCriticalError("Ctrl+C Pressed", i-1)
+
+    # Close the connection to the server we're uploading to (if any)
+    if toserv:
+        toserv.quit()
+    
+    return lastart
+
+
+def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
+             toserv, smtpfrom):
+    """ Sends a news article via email.
+
+        Parameters:
+            con:        connection to NNTP server
+            grp:        name of current newsgroup
+            artid:      article ID number on news server to send
+            addr:       email address to send message to (if blank, use default)
+            filter:     subject line filter; only send matching messages
+            subjprefix: string that should be prepended to mail copies of
+                        messages in this group
+            binmode:    binary handling behavior
+            toserv:     NNTP object for server that we should also upload this
+                        message to (using IHAVE)
+            smtpfrom:   address to use as sender in SMTP transaction
+    """
+    
+    global EMAILTO
+    global MAILCMD
+    global MAILERROR
+    
+    msg     = ""
+    subject = ""
+    msgid   = ""
+    notifychunk = None
+    
+    # Grab the article headers and add Subject: tag prefix
+    try:
+        set_timeout(TIMEOUT, "retrieve article headers")
+        for h in con.head(artid)[3]:
+            clear_timeout()
+
+            # Find and check the subject against the filter
+            if re.match("Subject: ", h):
+                subject = h
+
+                # Check against the filter, if there is one
+                if filter != "":
+                    if string.find(subject, filter) == -1:
+                        debug("   -> Message %s failed filter test." % artid)
+                        return
+                    else:
+                        debug("   -> Message %s passed filter test." % artid)
+
+                # Check to see if this message looks like a chunk of a
+                # multipart binary.
+                #
+                # NOTE: This code was removed because it would probably 
+                #       cause too many false positives.  We try to detect
+                #       various attachment schemes when we're processing
+                #       the body below, which is better but may miss some
+                #       binaries.
+                #
+                #if re.search(r"[\(\[]\d+/\d+[\]\)]$", subject):
+                #    debug("   -> Looks like a multipart binary.")
+                #    if BINARIES == "IGNORE":
+                #        debug("      --> Ignoring message.")
+                #        return
+                #    elif BINARIES == "SEND":
+                #        pass
+                #    else:
+                #        notifychunk = 1
+                #        debug("      --> Sending notification only.")
+
+                # Add the subject prefix
+                h = re.sub(r"^Subject: ", r"Subject: " + subjprefix, subject)
+
+            # Find and skip To: headers; necessary if the user is piping
+            # to /usr/lib/sendmail instead of using an SMTP server
+            if MAILCMD is not None and re.match("To: ", h):
+                continue
+            
+            # Find and remember the message ID (in case we just send a
+            # notification about a binary post).
+            else:
+                idline = re.match("Message-ID: (.*)", h)
+                if idline: msgid = idline.group(1)
+            
+            # Add this header to the email message
+            msg = msg + h + "\r\n"
+            
+    except nntplib.error_temp:
+        # Sometimes a recently emptied newsgroup's "last article" jumps from 0
+        # to some high number when the first article is posted in it.  This
+        # should prevent our program from crashing by simply ignoring the
+        # missing articles from 1 to the new article's number.
+        print "Warning: Article #%s wasn't on server..." % artid
+        return
+    except socket.error, msg:
+        # Sometimes NNTP raises socket.error exceptions instead of nntplib
+        # exceptions.  Just print these out and terminate.
+        raise NDLostNNTPConnection("NNTP connection failed: %s" % msg)
+    except EOFError:
+        # NNTP server closed the connection for some reason...
+        raise NDLostNNTPConnection("NNTP server closed connection while reading headers.")
+
+    # Add custom headers
+    extraheaders = string.join(EXTRAHEADERS, "\r\n")
+    extraheaders = re.sub(r"%g", grp, extraheaders)
+    msg = msg + extraheaders + "\r\n"
+    debug("   -> Generated email headers.")
+        
+    # Add body prefix
+    msg = msg + "\r\n"
+    if BODYPREFIX:
+        msg = msg + BODYPREFIX
+        debug("   -> Added body prefix to email")
+
+    # Send article body (or a notification message if it appears to be
+    # a binary and the BINARIES option is set to NOTIFY).
+    if notifychunk:
+        msg = msg + """
+The post entitled
+
+    %s
+
+with Message-ID
+
+    %s
+
+may be part of a multipart binary.  To view this post, please use your
+regular newsreader.""" % (subject, msgid)
+    else:
+        # Download the body and then rebuild it one line at a time, looking
+        # for indications that it is a binary.
+        realbody = ""
+        set_timeout(TIMEOUT, "retrieve article body")
+        bodylines = con.body(artid)[3]
+        clear_timeout()
+        for line in bodylines:
+            isbin = 0
+            filename = "unknown"
+            
+            # Check for yEnc info lines
+            if re.match(r"=ybegin", line):
+                debug("   --> Detected yEnc binary post")
+                isbin = 1
+                try:
+                    filename = re.search(r"name=(.+)$", line).group(1)
+                except: pass
+
+            # Check for uuEncode info lines
+            if re.match(r"begin \d+ ", line):
+                debug("   --> Detected uuEncoded binary post")
+                isbin = 1
+                try:
+                    filename = re.match(r"begin \d+ (.*)$", line).group(1)
+                except: pass
+            
+            # TODO: Check for other encodings
+
+            # Now decide what to do.
+            if isbin == 1 and binmode == "IGNORE":
+                debug("   --> Ignoring message")
+                return
+            elif isbin == 1 and binmode == "NOTIFY":
+                realbody = """
+The post entitled
+
+    %s
+
+with Message-ID
+
+    %s
+
+appears to belong to a binary file named
+
+    %s
+
+If you wish to view this post or download this file, please use your
+regular newsreader.""" % (subject, msgid, filename)
+                break
+            else:
+                realbody = realbody + line + "\r\n"
+                
+        # Now the body is built        
+        msg = msg + realbody
+        debug("   -> Constructed email body")
+
+    # Add body suffix
+    if BODYSUFFIX:
+        msg = msg + BODYSUFFIX + "\r\n"
+        debug("   -> Added body suffix to email")
+
+    # Send the email (or upload to another news server)
+    try:
+        if toserv:
+            debug("   -> Trying to upload to another news server (length=%d)." % len(msg))
+            toserv.ihave(msgid, msg)
+        elif MAILCMD is not None:
+            # TODO: Should probably do more sanity checking here.
+            try:
+                p = os.popen(MAILCMD, "w")
+                p.write("To: %s\r\n" % addr)
+                p.write(msg)
+                p.close()
+                debug("Article piped to external program.")
+            except IOError:
+                raise NDSMTPError_Permanennt("Failed to pipe to external program")
+        else:
+            debug("   -> Trying to send email (length=%d)." % len(msg))
+            mailer = smtplib.SMTP(SMTPSERVER, SMTPPORT)
+
+            # Authorize with the SMTP server if necessary
+            if (SMTPUSER is not None):
+                debug("   -> Trying to authorize with SMTP server")
+                try:
+                    mailer.login(SMTPUSER, SMTPPASS)
+                except smtplib.SMTPAuthenticationError:
+                    # Also always a permanent error.
+                    raise NDSMTPError_Permanennt("Username/password were rejected by the SMTP server.")
+            else:
+                debug("   -> Authorization not being used")
+
+            # Send the message off to the default address unless a special
+            # address was specified for this server.
+            if (addr == ""):
+                mailer.sendmail(smtpfrom, EMAILTO, msg)
+            else:
+                mailer.sendmail(smtpfrom, addr, msg)
+
+            # All done; close SMTP connection
+            mailer.quit()
+        debug("   -> Email sent successfully.")
+    except smtplib.SMTPRecipientsRefused, e:
+        # This is always a permanent error; regardless of MAILERROR
+        msg = ""
+        for r in e.recipients:
+            (code, reason) = e.recipients[r]
+            msg += "SMTP server rejected mail for '%s' with code %d: %s\n" % \
+                (r, code, reason)
+        raise NDSMTPError_Permanennt(msg)
+    except smtplib.SMTPConnectError:
+        # Another permanent error; failure to connect is not caused by spam
+        raise NDSMTPError_Temporary("Could not connect to SMTP mail server.")
+    except smtplib.SMTPDataError:
+        # This could be a real problem with the mail server, or it could be a
+        # spam-based rejection; we can't really tell.  Our behaviour depends
+        # on the MAILERROR setting.
+        if MAILERROR == "IGNORE":
+            debug("   -> Mail delivery failed; ignoring per MAILERROR settting")
+            print "WARNING: Mail delivery error encountered."
+        else:
+            raise NDSMTPError_Temporary("Data error while sending email.")
+    except smtplib.SMTPHeloError:
+        # Another error that must terminate the current run; we haven't sent
+        # the message yet, so that can't cause our failure.
+        raise NDSMTPError_Temporary("SMTP server did not reply to connection greeting.")
+    except smtplib.SMTPSenderRefused:
+        # Sender is the same for all messages and is based on NewsDeliver
+        # settings; if one message is rejected, they all will be so this is
+        # a permanent error.
+        raise NDSMTPError_Permanennt("SMTP server rejected email sender.")
+    except smtplib.SMTPServerDisconnected:
+        # Another case where we don't know if the disconnect was caused by a
+        # spam filter or a network glitch.  Check the MAILERROR setting.
+        if MAILERROR == "IGNORE":
+            debug("   -> SMTP disconnect; ignoring per MAILERROR settting")
+            print "WARNING: SMTP server disconnected unexpectedly."
+        else:
+            raise NDSMTPError_Temporary("The SMTP server terminated the connection.")
+    except smtplib.SMTPException, e:
+        # A catchall error; use MAILERROR
+        if MAILERROR == "IGNORE":
+            debug("   -> SMTP disconnect; ignoring per MAILERROR settting")
+            print "WARNING: SMTP server disconnected unexpectedly."
+        else:
+            raise NDSMTPError_Temporary("Unable to send email with SMTP: %s" % e)
+    except socket.error, msg:
+        raise NDSMTPError_Temporary("Connection to SMTP server failed: %s" % msg[1])
+    # TODO: Figure out what kind of exception IHAVE throws and add it here...
+    sleep(1.0)
+
+
+def do_addgrp(grp):
+    """ Adds a group to the delivery list.
+    
+        Parameters:
+            grp:  Name of group to start delivering
+    """
+
+    global groups
+
+    if grp == "":
+        raise SystemExit("No group name specified for addition.")
+    
+    if groups.has_key(grp):
+        raise SystemExit("'%s' is already being monitored." % grp)
+    
+    con = get_connection()
+    #grpfile = os.path.expanduser("~/.newsdeliver.grp")
+    lastart = 0
+    resp = ""
+    try:
+        # Open the group file
+        fp = open(GRPFILE, "a")
+
+        # Try to get last article number for group
+        set_timeout(TIMEOUT)
+        lastart = con.group(grp)[3]
+        clear_timeout()
+        fp.write("[%s]\n" % grp)
+        fp.write("lastseen=%s\n" % lastart)
+        fp.write("\n")
+        fp.close()
+    except NDTimeout:
+        raise SystemExit("Timed out while retrieving newsgroup information from server")
+    except nntplib.error_temp:
+        raise SystemExit("Group '%s' does not exist on server." % grp)
+    except nntplib.error_perm:
+        raise SystemExit("Could not get info on %s (does it exist?)" % grp)
+    except IOError, ex:
+        raise SystemExit("Could not open %s for update." % GRPFILE)
+
+
+def do_remgrp(grp):
+    """ Removes a newsgroup from the delivery list.
+
+        Parameters:
+            grp:  Name of group to quit delivering
+    """
+
+    global groups
+
+    if grp == "":
+        raise SystemExit("No group specified for removal.")
+    
+    if not groups.has_key(grp):
+        raise SystemExit("Group '%s' is not being monitored yet." % grp)
+
+    del groups[grp]
+    writegroups()
+
+
+def do_catchup(grp):
+    """ Marks all current articles on a newsgroup as "seen" so that they
+        won't get delivered.  If the newsgroup name is empty, this function
+        performs 'catchup' on all newsgroups in the delivery file.
+
+        Parameters:
+            grp:  Name of newsgroup to catchup on
+    """
+
+    global groups
+
+    if (len(groups.keys()) == 0):
+        raise SystemExit("You are not monitoring any groups yet.")
+
+    if grp == "" or grp == "all":
+        catchuplist = groups.keys()
+    else:
+        if not groups.has_key(grp):
+            raise SystemExit("Group '%s' is not being monitored yet." % grp)
+        catchuplist = [grp]
+
+    con = get_connection()
+    
+    # Get new "last article" numbers for each newsgroup
+    for g in catchuplist:
+        try:
+            set_timeout(TIMEOUT)
+            groups[g]["lastseen"] = con.group(g)[3]
+            clear_timeout()
+        except NDTimeout:
+            raise SystemExit("Timed out while retrieving newsgroup information from server")
+        except nntplib.error_temp:
+            raise SystemExit("Group '%s' does not exist on server." % grpname)
+        except nntplib.error_perm:
+            raise SystemExit("Could not get info on %s: %s" % (grpname,resp))
+            
+    # Write updated stats back to group file
+    writegroups()
+
+def get_connection():
+    """ Returns a connection to the NNTP server. """
+    
+    try:
+        set_timeout(TIMEOUT, "establish connection")
+        ret = nntplib.NNTP_SSL(NNTPSERVER, port=NNTPPORT,
+                           user=NNTPUSER, password=NNTPPASS)
+        clear_timeout()
+        return ret
+    except NDTimeout:
+        raise SystemExit("Timed out while establishing NNTP connection")
+    except (socket.error):
+        raise SystemExit("NNTP Socket Connection Failed (network problem?)")
+    except nntplib.error_temp:
+        raise SystemExit("NNTP server temporarily unavailable.")
+    except nntplib.error_perm:
+        raise SystemExit("Could not connect to NNTP server!")
+
+
+def do_newconf(dummy = ""):
+    """ Creates a new user configuration file with default settings. """
+    
+    print "Creating new configuration file..."
+    conffile = os.path.expanduser("~/.newsdeliverrc")
+    #try:
+    if 1==1:
+        fp = open(conffile, "w")
+        fp.write("""### .newsdeliverrc
+###
+### This is the configuration file for NewsDeliver and was generated
+### for you automatically.  Please make the appropriate changes to
+### this file
+###
+
+# Ignore these next three lines; they're just a listing of all settings that
+# can be modified in this file.
+global NNTPSERVER, NNTPPORT, NNTPUSER, NNTPPASS, EMAILTO, SMTPSERVER, SMTPPORT
+global SMTPUSER, SMTPPASS, SUBJPREFIX, BODYPREFIX, BODYSUFFIX, EXTRAHEADERS
+global BINARIES, DAEMONSLEEP, GRPFILE, DEBUGFILE, TIMEOUT
+
+# NNTP server to get news articles from  (e.g. news.ucdavis.edu)
+NNTPSERVER = 'news'
+
+# Port that NNTP server is listening on
+NNTPPORT = 119
+
+# NNTP username to login with; uncomment and change if required by your server
+#NNTPUSER = 'foo'
+
+# NNTP password to login with; uncomment and change if required by your server
+#NNTPPASS = 'bar'
+
+# Email address to deliver news articles to
+EMAILTO = '%s@%s'
+
+# SMTP server used to send email
+SMTPSERVER = 'localhost'
+
+# Port that the SMTP server listens on
+SMTPPORT = 25
+
+# Mail command; uncomment this if you want to pipe the message to a program
+# (e.g., "sendmail -t").  If this option is present and uncommented, it
+# will override your SMTP settings.  Make sure you specify the full path
+# if necessary.
+#MAILCMD = "/usr/lib/sendmail -t"
+
+# SMTP username to authorize with; uncomment and change if required by your
+# mail server
+#SMTPUSER = 'foo'
+
+# SMTP password to authorize with; uncomment and change if required by your
+# mail server
+#SMTPPASS = 'bar'
+
+# This address will be used as the sender's address when talking to the
+# SMTP server.  If you leave this commented out, the value of EMAILTO
+# will be used.  You can also set this on a per-group basis by using
+# the 'stmpfrom' attribute in .newsdeliver.grp.
+#SMTPFROM = '%s@%s'
+
+# Prefix to add to Subject: lines
+SUBJPREFIX = '[NEWSDELIVER] '
+
+# Prefix to add to message body (multiline okay)
+BODYPREFIX = \"\"\"
+\"\"\"
+
+# Suffix to add to message body (multiline okay)
+BODYSUFFIX = \"\"\"
+\"\"\"
+
+# Extra headers to add to messages.  Any instances of %%g will be replaced by 
+# the current newsgroup name; this makes it easier for people to filter
+# cross-posted articles.
+EXTRAHEADERS = [
+    'X-Delivered-By: NewsDeliver %s',
+    'X-NNTP-Email-Gateway: NewsDeliver %s',
+    'X-Fetched-From: %%g'
+]
+
+# If we detect a binary post, how should we handle it?  Possible values:
+#    'IGNORE': Binary posts are skipped entirely
+#    'NOTIFY': A notification message is sent in place of the actual post
+#    'SEND': Binary posts will be sent as normal
+BINARIES = 'NOTIFY'
+
+# What should we do if we encounter an error while sending an email?  It might
+# be a temporary problem with the mail server (in which case it would work
+# properly again after the mail server problem clears up) or it might be that
+# the message in question is spam and will never be accepted (so we want to
+# ignore the failure and move on).  Depending on the types of messages you
+# encounter and what type of failures you expect to see, you can set this
+# setting to one of:
+#    'FAIL':   Terminate the newsdeliver process; if you don't have problems
+#              with spam filters causing mail delivery to fail, this is the
+#              best option since you won't lose messages while the mail server
+#              is having temporary problems.
+#    'IGNORE': Ignore failures to deliver mail copies of newsgroup postings.
+#              If you monitor newsgroups that get a lot of spam and if your
+#              mail server is set up to reject these messages *at SMTP time*,
+#              this is your best option since a single spam message won't get
+#              NewsDeliver 'stuck.'
+# In the future, I plan to add a 'queue' option to queue up failed messages
+# and retry them on subsequent runs.
+MAILERROR = 'FAIL'
+
+# If NewsDeliver is run in daemon mode, this option will specify how long
+# (in seconds) it sleeps after finishing a run before starting the next one.
+# If not running in daemon mode, this option is ignored.
+DAEMONSLEEP = 60
+
+# Location of NewsDeliver's 'group' file.  You probably want to leave this as
+# is unless you have multiple rcfiles, pointing at different group files.
+# This is a temporary hack that will go away in the next version when the
+# config file format changes.
+GRPFILE = os.path.expanduser("~/.newsdeliver.grp")
+
+# Where should verbose output be logged?  If this is empty or not set, output
+# will be logged to stdout.  Otherwise, it will be appended to the file
+# specified.
+#DEBUGFILE = "~/newsdeliver.debug.out"
+
+# How long should we wait for network operations to complete before timing out?
+# Default is 20 seconds.
+#TIMEOUT = 20
+
+""" % (getpass.getuser(), socket.gethostname(),
+       getpass.getuser(), socket.gethostname(),
+       __version__, __version__))
+        fp.close()
+        print "Configuration written to %s." % conffile
+        print "Please edit it to meet your needs."
+    #except:
+    #    raise SystemExit("Could not write to %s!" % conffile)
+
+
+def do_set(attr, param):
+    """ Sets a newsgroup attribute.
+    
+        Parameters:
+            attr:   The attribute to set (e.g. "filter")
+            param:  Group name and attribute value.  Format is
+                    grpname=subjprefix.
+    """
+
+    global groups
+
+    if param == "":
+        raise SystemExit("No group/filter specified.")
+    
+    try:
+        [grp, val] = string.split(param, "=", 1)
+    except:
+        raise SystemExit("You must specify the prefix as 'grpname=prefix'")
+
+    if not groups.has_key(grp):
+        raise SystemExit("Group '%s' is not being monitored yet." % grp)
+    
+    groups[grp][attr] = val
+    writegroups()
+
+
+def do_listgrps():
+    """ Prints a list of all newsgroups managed by NewsDeliver, along
+        with the current filter for the group.
+    """
+
+    global groups
+
+    if len(groups.keys()) == 0:
+        raise SystemExit("You're not subscribed to any groups yet.")
+    
+    print "Newsgroup", " "*(30-len("Newsgroup")), "Filter"
+    print "-" * 31, "-" * 8
+    for g in groups.keys():
+        if groups[g].has_key("filter"):
+            filt = groups[g]["filter"]
+        else:
+            filt = ""
+        print g, " "*(30-len(g)), filt
+
+def get_lock():
+    """ Obtains a lock to make sure a second newsdeliver process does not
+        start up while a long-running process is still working.
+    """
+    debug("Getting lockfile...")
+    try:
+        f = open(GRPFILE + ".lock", "r")
+        pid = f.readline()
+        pid = int(pid)
+        
+        # kill -0 won't kill the process, but will throw an exception if
+        # the process is gone
+        try:
+            os.kill(pid,0)
+            
+            # no exception: process still running
+            raise SystemExit("Another newsdeliver process is still running.")
+        except OSError:
+            # process is gone; we may proceed
+            print "Stale lockfile found.  Removing."
+    except ValueError:
+        # Empty lockfile; I guess it's okay to proceed, but I wish I knew
+        # how this happened; there's only been one report of this so far.
+        pass
+    except IOError:
+        pass
+        # File does not exist -- we can proceed
+
+    # We need to create our own lock file
+    f = open(GRPFILE + ".lock", "w")
+    f.write(str(os.getpid()))
+    f.close()
+    debug("Got lockfile.")
+    
+
+def release_lock():
+    """ Releases the lock so that future newsdeliver processes can run """
+    debug("Releasing lockfile.")
+    try:
+        os.unlink(GRPFILE + ".lock")
+    except:
+        print "WARNING: Lockfile already gone..."
+
+
+def readgroups(silent=0):
+    """ Reads the group information file into memory. """
+    global groups
+
+    #grpfile = os.path.expanduser("~/.newsdeliver.grp")
+    try:
+        f  = open(GRPFILE, "r")
+        firstline = f.readline()
+
+        # Is this an old-style group file?
+        if not re.match("<NewsDeliver ", firstline):
+            line = firstline
+            while line:
+                line = line[:-1]            # chop newline
+                if len(line) == 0: line = f.readline(); continue
+                entfields = string.split(line, ":", 3)
+                [entgrp, lastseen] = entfields[0:2]
+                groups[entgrp] = {"lastseen": lastseen}
+                if len(entfields) >= 3: groups[entgrp]["addr"] = entfields[2]
+                if len(entfields) == 4: groups[entgrp]["filter"] = entfields[3]
+                line = f.readline()
+            f.close()
+            debug("Read %d old style groups." % len(groups.keys()))
+            return
+                    
+        # If we get here, it's a new style file
+        grpname = ""
+        line = f.readline()
+        while line:
+            # Ignore blank lines
+            if re.match("\s*$", line):  line = f.readline(); continue
+
+            # Group name?
+            m = re.match("\[(\S+)\]", line)
+            m2 = re.match("\s*(\w+)=(.*)", line)
+            if m:
+                grpname = m.group(1)
+                groups[grpname] = {}
+
+            # Key/value pair?
+            elif m2:
+                if (grpname == ""):
+                    print "WARNING: Expected a group name before '%s'" % line
+                    continue
+                key = m2.group(1)
+                val = m2.group(2)
+                groups[grpname][key] = val
+
+            line = f.readline()
+
+        f.close()
+
+    except IOError, ex:
+        if silent == 0:
+            raise SystemExit("Could not read %s.  Maybe you're not subscribed to any groups yet." % GRPFILE)
+        else:
+            f = open(GRPFILE, "w")
+            f.write("<NewsDeliver %s>\n\n" % __version__)
+            f.close()
+
+
+def writegroups():
+    """ Writes group information back out to the group file. """
+    global groups
+
+    try:
+        #grpfile = os.path.expanduser("~/.newsdeliver.grp")
+        f = open("%s.tmp" % GRPFILE, "w")
+        f.write("<NewsDeliver %s>\n\n" % __version__)
+        for g in groups.keys():
+            f.write("[%s]\n" % g)
+            for k in groups[g].keys():
+                if groups[g][k] != "":
+                    f.write("%s=%s\n" % (k, groups[g][k]))
+            f.write("\n")
+        f.close()
+        os.rename("%s.tmp" % GRPFILE, GRPFILE)
+    except IOError, ex:
+        raise SystemExit("Could not write %s: %s." % (GRPFILE, ex))
+    except Exception, ex:
+        raise SystemExit("Failed to replace %s: %s" % (GRPFILE, ex))
+
+
+def debug(msg):
+    """ Prints the given message iff verbose mode is set. """
+    global VERBOSE
+
+    if VERBOSE == 1:
+        debugfp.write("  [DEBUG] %s\n" % msg)
+        debugfp.flush()
+
+def set_timeout(limit, operation="not specified"):
+    global current_operation
+
+    current_operation = operation
+    signal.alarm(limit)
+
+def clear_timeout():
+    global current_operation
+
+    current_operation = "unknown"
+    signal.alarm(0)
+
+class NDCriticalError(exceptions.Exception):
+    """ An exception that is thrown if something bad happens while we're
+        sending newsgroup articles.  The catch block will save the number
+        of messages that were successfully sent and then exit gracefully.
+    """
+    def __init__(self, msg, lastsent):
+        self.msg = msg
+        self.lastsent = lastsent
+
+class NDCriticalError_Single(NDCriticalError):
+    """ Same as NDCriticalError except that if NewsDeliver is running in
+        daemon mode, it will just stop until the next scheduled wakeup
+        instead of terminating completely.
+    """
+    def __init__(self, msg, lastsent):
+        NDCriticalError.__init__(self, msg, lastsent)
+
+class NDTimeout(NDCriticalError_Single):
+    """ If an operation times out, we'll raise this.  In daemon mode, we
+        just skip the current cycle and will resume normal operation on the
+        next wakeup.
+    """
+    def __init__(self):
+        self.msg = current_operation
+
+class NDLostNNTPConnection(NDCriticalError_Single):
+    """ If we lose our NNTP connection, we'll raise this.  In daemon mode,
+        the connection will be re-established and processing will continue
+        the next time the daemon wakes up.
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+class NDSMTPError_Permanennt(NDCriticalError):
+    """ If we hit an SMTP error that is probably due to server
+        misconfiguration (e.g., username/password error), this
+        exception will be raised.
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+class NDSMTPError_Temporary(NDCriticalError_Single):
+    """ If we hit an SMTP error that may go away on subsequent tries,
+        we raise this exception.  In daemon mode, this will cause
+        NewsDeliver to sleep until the next wakeup instead of terminating
+        the process entirely.
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+
+# Load the user's config file and execute it.  If the config file does
+# not exist, generate it automatically.
+try:
+    f = open(os.path.expanduser("~/.newsdeliverrc"))
+    exec(f)
+except IOError:
+    print "Configuration file missing -- we'll create one now."
+    do_newconf()
+    print "You may now re-run NewsDeliver."
+    sys.exit(0)
+
+main()
