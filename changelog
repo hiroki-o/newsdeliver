@@ -1,5 +1,6 @@
 1.4.1-py3.1
 	- Adoption to Python3
+	- Supporting NNTP_SSL
 	- Supporting TLS for SMTP authoring
 
 1.4.1
