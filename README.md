@@ -1,3 +1,13 @@
+About this project
+----
+
+This is a branch project of NewsDeliver originally hosted at SourceForge ( http://newsdeliver.sourceforge.net/ )
+for following purposes:
+ - Python 3 support
+ - NNTP SSL support
+ - SMTP TLS support
+
+
 NewsDeliver, A Simple NNTP to Email Gateway
 ====
 Copyright (C) 2002-2005 by Matt Roper <matt@mattrope.com>
