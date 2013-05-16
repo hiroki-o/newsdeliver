@@ -16,17 +16,19 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
+# 2013 modified by Hiroki Omae <pigeon6@gmail.com>
+# for Python 3
 
 """
 newsdeliver -- A configurable news to email gateway.
 """
 
 __author__  = "Matt Roper <matt@mattrope.com>"
-__version__ = "1.4"
+__version__ = "1.4.2"
 
 import os, sys, re, getopt, getpass, string, signal
 import socket, nntplib, smtplib
-import exceptions
+#import exceptions
 from time import localtime, strftime, sleep
 
 VALIDOPTS = {}
@@ -45,6 +47,7 @@ SMTPUSER     = None
 SMTPPASS     = None
 SMTPFROM     = None
 MAILCMD      = None
+SMTPTLS      = False
 SUBJPREFIX   = "" 
 BODYPREFIX   = "" 
 BODYSUFFIX   = "" 
@@ -107,7 +110,7 @@ def main():
     try:
         optlist, args = getopt.getopt(sys.argv[1:], '', VALIDOPTS)
     except getopt.error:
-        print "Error parsing command line parameters."
+        print("Error parsing command line parameters.")
         do_help()
         sys.exit(1)
 
@@ -135,62 +138,62 @@ def main():
         aparam = param
         if (option == "--newconf"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "newconf"
         elif (option == "--addgrp"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "addgrp"
             readgroups(1)
         elif (option == "--remgrp"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "remgrp"
             readgroups()
         elif (option == "--filter"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "filter"
             readgroups()
         elif (option == "--setaddr"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "setaddr"
             readgroups()
         elif (option == "--catchup"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(1)
             action = "catchup"
             readgroups()
         elif (option == "--list"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(0)
             action = "list"
             readgroups()
         elif (option == "--subjprefix"):
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(0)
             action = "subjprefix"
             readgroups()
         elif option == "--daemon":
             if action != "check":
-                print "Too many actions specified on command line"
+                print("Too many actions specified on command line")
                 do_help()
                 sys.exit(0)
             action = "daemon"
@@ -204,16 +207,16 @@ def main():
             # This is a quick hack until I update the config file format to 
             # support multiple servers and such.
             if action != "check":
-                print "--rcfile should be the first option on the command line"
+                print("--rcfile should be the first option on the command line")
                 sys.exit(0)
             try:
                 f = open(aparam)
                 exec(f)
             except IOError:
-                print "Config file '%s' not found!" % aparam
+                print("Config file '%s' not found!" % aparam)
                 sys.exit(0)
         else:
-            print "Unrecognized option %s" % option
+            print("Unrecognized option %s" % option)
             do_help()
             sys.exit(0)
 
@@ -245,7 +248,7 @@ def do_help(dummy = ""):
     
     prog = sys.argv[0]
     prog = string.replace(prog,r"//",r"/")
-    print """    Usage:
+    print("""    Usage:
         %s
         %s <grpname1> [ <grpname2> ... ]
         %s [ --help ]
@@ -259,7 +262,7 @@ def do_help(dummy = ""):
         %s [ --catchup <grpname> ]
         %s [ --catchup all ]
         %s [ --daemon ]
-""" % (prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog)
+""" % (prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog))
 
 
 def do_check(grps):
@@ -274,7 +277,7 @@ def do_check(grps):
 
     errormsg = ""       # Set on server errors
 
-    if (len(groups.keys()) == 0):
+    if (len(list(groups.keys())) == 0):
         raise SystemExit("You are not monitoring any groups yet.")
 
     # Try to get a lock and then connect to the news server.  If there's
@@ -282,13 +285,13 @@ def do_check(grps):
     con = get_connection()
     
     # If no group names were specified, check all groups.
-    if len(grps) == 0: grps = groups.keys()
+    if len(grps) == 0: grps = list(groups.keys())
     
     for g in grps:
         debug("Checking %s; last message seen = %s" % (g, groups[g]["lastseen"]))
 
-        if not groups.has_key(g):
-            print "WARNING: '%s' is not being monitored yet." % g
+        if g not in groups:
+            print("WARNING: '%s' is not being monitored yet." % g)
             continue
 
         # Assume default parameters for this group initially
@@ -303,12 +306,12 @@ def do_check(grps):
             smtpfrom = EMAILTO
 
         # Figure out group-specific details (filter, address, etc.)
-        if groups[g].has_key("filter"):     filter     = groups[g]["filter"]
-        if groups[g].has_key("addr"):       addr       = groups[g]["addr"]
-        if groups[g].has_key("subjprefix"): subjprefix = groups[g]["subjprefix"]
-        if groups[g].has_key("binaries"):   binmode    = groups[g]["binaries"]
-        if groups[g].has_key("uploadto"):   toserv     = groups[g]["uploadto"]
-        if groups[g].has_key("smtpfrom"):   smtpfrom   = groups[g]["smtpfrom"]
+        if "filter" in groups[g]:     filter     = groups[g]["filter"]
+        if "addr" in groups[g]:       addr       = groups[g]["addr"]
+        if "subjprefix" in groups[g]: subjprefix = groups[g]["subjprefix"]
+        if "binaries" in groups[g]:   binmode    = groups[g]["binaries"]
+        if "uploadto" in groups[g]:   toserv     = groups[g]["uploadto"]
+        if "smtpfrom" in groups[g]:   smtpfrom   = groups[g]["smtpfrom"]
         
         try:
             groups[g]["lastseen"] = check_group(con, g, groups[g]["lastseen"], 
@@ -319,7 +322,7 @@ def do_check(grps):
         except EOFError:
             # NNTP server closed the connection for some reason...
             raise NDLostNNTPConnection("NNTP server closed connection while checking group.")
-        except NDCriticalError, e:
+        except NDCriticalError as e:
             # Something bad happened (probably with the SMTP server
             # or the NNTP server).  We'll remember how many messages
             # actually got sent and then skip the rest of the groups.
@@ -345,7 +348,7 @@ def do_daemon():
 
     errormsg = ""       # Set on server errors
 
-    if (len(groups.keys()) == 0):
+    if (len(list(groups.keys())) == 0):
         raise SystemExit("You are not monitoring any groups yet.")
 
     # Try to get a lock and then connect to the news server.  If there's
@@ -365,7 +368,7 @@ def do_daemon():
         # Temporarily ignore SIGHUP
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
-        for g in groups.keys():
+        for g in list(groups.keys()):
             debug("Checking %s; last message seen = %s" % (g, groups[g]["lastseen"]))
 
             # Assume default parameters for this group initially
@@ -380,12 +383,12 @@ def do_daemon():
                 smtpfrom = EMAILTO
 
             # Figure out group-specific details (filter, address, etc.)
-            if groups[g].has_key("filter"):     filter     = groups[g]["filter"]
-            if groups[g].has_key("addr"):       addr       = groups[g]["addr"]
-            if groups[g].has_key("subjprefix"): subjprefix = groups[g]["subjprefix"]
-            if groups[g].has_key("binaries"):   binmode    = groups[g]["binaries"]
-            if groups[g].has_key("uploadto"):   toserv     = groups[g]["uploadto"]
-            if groups[g].has_key("smtpfrom"):   smtpfrom   = groups[g]["smtpfrom"]
+            if "filter" in groups[g]:     filter     = groups[g]["filter"]
+            if "addr" in groups[g]:       addr       = groups[g]["addr"]
+            if "subjprefix" in groups[g]: subjprefix = groups[g]["subjprefix"]
+            if "binaries" in groups[g]:   binmode    = groups[g]["binaries"]
+            if "uploadto" in groups[g]:   toserv     = groups[g]["uploadto"]
+            if "smtpfrom" in groups[g]:   smtpfrom   = groups[g]["smtpfrom"]
             
             try:
                 groups[g]["lastseen"] = check_group(con, g, groups[g]["lastseen"], 
@@ -409,12 +412,12 @@ def do_daemon():
                     con = get_connection()
                     if not con: sleep(DAEMONSLEEP)
                 break
-            except NDTimeout, e:
+            except NDTimeout as e:
                 # Timed out while checking newsgroup
                 groups[g]["lastseen"] = e.lastsent
                 debug("Timed out on operation '%s' while checking group; sleeping" % e.msg)
                 break
-            except NDCriticalError_Single, e:
+            except NDCriticalError_Single as e:
                 # Something bad happened (probably with the SMTP server
                 # or the NNTP server), but we're only going to terminate
                 # the current run; we'll wait until the next daemon
@@ -422,7 +425,7 @@ def do_daemon():
                 groups[g]["lastseen"] = e.lastsent
                 debug("Critical Error, sleeping: %s" % e.msg)
                 break
-            except NDCriticalError, e:
+            except NDCriticalError as e:
                 # Something bad happened (probably with the SMTP server
                 # or the NNTP server) and we need to completely shut
                 # down.  We'll remember how many messages actually got
@@ -505,7 +508,7 @@ def check_group(con, grp, lastseen, addr, filter, subjprefix, binmode,
             debug(" -> Checking article %d" % i)
             send_art(con, grp, str(i), addr, filter, subjprefix, binmode,
                      toserv, smtpfrom)
-    except NDCriticalError, e:
+    except NDCriticalError as e:
         e.lastsent = i-1
         raise e
     #except SystemExit, e:
@@ -537,7 +540,7 @@ def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
                         message to (using IHAVE)
             smtpfrom:   address to use as sender in SMTP transaction
     """
-    
+
     global EMAILTO
     global MAILCMD
     global MAILERROR
@@ -546,13 +549,19 @@ def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
     subject = ""
     msgid   = ""
     notifychunk = None
+
+    debug("  -> artid:%s" % artid)
     
     # Grab the article headers and add Subject: tag prefix
     try:
         set_timeout(TIMEOUT, "retrieve article headers")
-        for h in con.head(artid)[3]:
+        info = con.head(artid)
+        for hb in info[1].lines:
             clear_timeout()
 
+            # converting byte-like object to string
+            h = hb.decode("utf-8")
+            
             # Find and check the subject against the filter
             if re.match("Subject: ", h):
                 subject = h
@@ -587,6 +596,7 @@ def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
 
                 # Add the subject prefix
                 h = re.sub(r"^Subject: ", r"Subject: " + subjprefix, subject)
+                debug("   -> Subject: %s" % h)
 
             # Find and skip To: headers; necessary if the user is piping
             # to /usr/lib/sendmail instead of using an SMTP server
@@ -607,9 +617,9 @@ def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
         # to some high number when the first article is posted in it.  This
         # should prevent our program from crashing by simply ignoring the
         # missing articles from 1 to the new article's number.
-        print "Warning: Article #%s wasn't on server..." % artid
+        print("Warning: Article #%s wasn't on server..." % artid)
         return
-    except socket.error, msg:
+    except socket.error as msg:
         # Sometimes NNTP raises socket.error exceptions instead of nntplib
         # exceptions.  Just print these out and terminate.
         raise NDLostNNTPConnection("NNTP connection failed: %s" % msg)
@@ -618,7 +628,8 @@ def send_art(con, grp, artid, addr, filter, subjprefix, binmode,
         raise NDLostNNTPConnection("NNTP server closed connection while reading headers.")
 
     # Add custom headers
-    extraheaders = string.join(EXTRAHEADERS, "\r\n")
+    #extraheaders = string.join(EXTRAHEADERS, "\r\n")
+    extraheaders = "\r\n".join(EXTRAHEADERS)
     extraheaders = re.sub(r"%g", grp, extraheaders)
     msg = msg + extraheaders + "\r\n"
     debug("   -> Generated email headers.")
@@ -648,11 +659,13 @@ regular newsreader.""" % (subject, msgid)
         # for indications that it is a binary.
         realbody = ""
         set_timeout(TIMEOUT, "retrieve article body")
-        bodylines = con.body(artid)[3]
+        bodylines = con.body(artid)[1].lines
         clear_timeout()
-        for line in bodylines:
+        for line_byte in bodylines:
             isbin = 0
             filename = "unknown"
+            # converting byte-like object to string
+            line = line_byte.decode("utf-8")
             
             # Check for yEnc info lines
             if re.match(r"=ybegin", line):
@@ -723,6 +736,13 @@ regular newsreader.""" % (subject, msgid, filename)
         else:
             debug("   -> Trying to send email (length=%d)." % len(msg))
             mailer = smtplib.SMTP(SMTPSERVER, SMTPPORT)
+            mailer.set_debuglevel(1)
+
+            #smtp.ehlo()
+
+            if SMTPTLS:
+                mailer.starttls()
+                mailer.ehlo()
 
             # Authorize with the SMTP server if necessary
             if (SMTPUSER is not None):
@@ -745,7 +765,7 @@ regular newsreader.""" % (subject, msgid, filename)
             # All done; close SMTP connection
             mailer.quit()
         debug("   -> Email sent successfully.")
-    except smtplib.SMTPRecipientsRefused, e:
+    except smtplib.SMTPRecipientsRefused as e:
         # This is always a permanent error; regardless of MAILERROR
         msg = ""
         for r in e.recipients:
@@ -762,7 +782,7 @@ regular newsreader.""" % (subject, msgid, filename)
         # on the MAILERROR setting.
         if MAILERROR == "IGNORE":
             debug("   -> Mail delivery failed; ignoring per MAILERROR settting")
-            print "WARNING: Mail delivery error encountered."
+            print("WARNING: Mail delivery error encountered.")
         else:
             raise NDSMTPError_Temporary("Data error while sending email.")
     except smtplib.SMTPHeloError:
@@ -779,17 +799,17 @@ regular newsreader.""" % (subject, msgid, filename)
         # spam filter or a network glitch.  Check the MAILERROR setting.
         if MAILERROR == "IGNORE":
             debug("   -> SMTP disconnect; ignoring per MAILERROR settting")
-            print "WARNING: SMTP server disconnected unexpectedly."
+            print("WARNING: SMTP server disconnected unexpectedly.")
         else:
             raise NDSMTPError_Temporary("The SMTP server terminated the connection.")
-    except smtplib.SMTPException, e:
+    except smtplib.SMTPException as e:
         # A catchall error; use MAILERROR
         if MAILERROR == "IGNORE":
             debug("   -> SMTP disconnect; ignoring per MAILERROR settting")
-            print "WARNING: SMTP server disconnected unexpectedly."
+            print("WARNING: SMTP server disconnected unexpectedly.")
         else:
             raise NDSMTPError_Temporary("Unable to send email with SMTP: %s" % e)
-    except socket.error, msg:
+    except socket.error as msg:
         raise NDSMTPError_Temporary("Connection to SMTP server failed: %s" % msg[1])
     # TODO: Figure out what kind of exception IHAVE throws and add it here...
     sleep(1.0)
@@ -807,7 +827,7 @@ def do_addgrp(grp):
     if grp == "":
         raise SystemExit("No group name specified for addition.")
     
-    if groups.has_key(grp):
+    if grp in groups:
         raise SystemExit("'%s' is already being monitored." % grp)
     
     con = get_connection()
@@ -832,7 +852,7 @@ def do_addgrp(grp):
         raise SystemExit("Group '%s' does not exist on server." % grp)
     except nntplib.error_perm:
         raise SystemExit("Could not get info on %s (does it exist?)" % grp)
-    except IOError, ex:
+    except IOError as ex:
         raise SystemExit("Could not open %s for update." % GRPFILE)
 
 
@@ -848,7 +868,7 @@ def do_remgrp(grp):
     if grp == "":
         raise SystemExit("No group specified for removal.")
     
-    if not groups.has_key(grp):
+    if grp not in groups:
         raise SystemExit("Group '%s' is not being monitored yet." % grp)
 
     del groups[grp]
@@ -866,13 +886,13 @@ def do_catchup(grp):
 
     global groups
 
-    if (len(groups.keys()) == 0):
+    if (len(list(groups.keys())) == 0):
         raise SystemExit("You are not monitoring any groups yet.")
 
     if grp == "" or grp == "all":
-        catchuplist = groups.keys()
+        catchuplist = list(groups.keys())
     else:
-        if not groups.has_key(grp):
+        if grp not in groups:
             raise SystemExit("Group '%s' is not being monitored yet." % grp)
         catchuplist = [grp]
 
@@ -916,7 +936,7 @@ def get_connection():
 def do_newconf(dummy = ""):
     """ Creates a new user configuration file with default settings. """
     
-    print "Creating new configuration file..."
+    print("Creating new configuration file...")
     conffile = os.path.expanduser("~/.newsdeliverrc")
     #try:
     if 1==1:
@@ -974,6 +994,9 @@ SMTPPORT = 25
 # will be used.  You can also set this on a per-group basis by using
 # the 'stmpfrom' attribute in .newsdeliver.grp.
 #SMTPFROM = '%s@%s'
+
+# SMTP uses TLS encryption
+#SMTPTLS   = True
 
 # Prefix to add to Subject: lines
 SUBJPREFIX = '[NEWSDELIVER] '
@@ -1045,8 +1068,8 @@ GRPFILE = os.path.expanduser("~/.newsdeliver.grp")
        getpass.getuser(), socket.gethostname(),
        __version__, __version__))
         fp.close()
-        print "Configuration written to %s." % conffile
-        print "Please edit it to meet your needs."
+        print("Configuration written to %s." % conffile)
+        print("Please edit it to meet your needs.")
     #except:
     #    raise SystemExit("Could not write to %s!" % conffile)
 
@@ -1070,7 +1093,7 @@ def do_set(attr, param):
     except:
         raise SystemExit("You must specify the prefix as 'grpname=prefix'")
 
-    if not groups.has_key(grp):
+    if grp not in groups:
         raise SystemExit("Group '%s' is not being monitored yet." % grp)
     
     groups[grp][attr] = val
@@ -1084,17 +1107,17 @@ def do_listgrps():
 
     global groups
 
-    if len(groups.keys()) == 0:
+    if len(list(groups.keys())) == 0:
         raise SystemExit("You're not subscribed to any groups yet.")
     
-    print "Newsgroup", " "*(30-len("Newsgroup")), "Filter"
-    print "-" * 31, "-" * 8
-    for g in groups.keys():
-        if groups[g].has_key("filter"):
+    print("Newsgroup", " "*(30-len("Newsgroup")), "Filter")
+    print("-" * 31, "-" * 8)
+    for g in list(groups.keys()):
+        if "filter" in groups[g]:
             filt = groups[g]["filter"]
         else:
             filt = ""
-        print g, " "*(30-len(g)), filt
+        print(g, " "*(30-len(g)), filt)
 
 def get_lock():
     """ Obtains a lock to make sure a second newsdeliver process does not
@@ -1115,7 +1138,7 @@ def get_lock():
             raise SystemExit("Another newsdeliver process is still running.")
         except OSError:
             # process is gone; we may proceed
-            print "Stale lockfile found.  Removing."
+            print("Stale lockfile found.  Removing.")
     except ValueError:
         # Empty lockfile; I guess it's okay to proceed, but I wish I knew
         # how this happened; there's only been one report of this so far.
@@ -1137,7 +1160,7 @@ def release_lock():
     try:
         os.unlink(GRPFILE + ".lock")
     except:
-        print "WARNING: Lockfile already gone..."
+        print("WARNING: Lockfile already gone...")
 
 
 def readgroups(silent=0):
@@ -1162,7 +1185,7 @@ def readgroups(silent=0):
                 if len(entfields) == 4: groups[entgrp]["filter"] = entfields[3]
                 line = f.readline()
             f.close()
-            debug("Read %d old style groups." % len(groups.keys()))
+            debug("Read %d old style groups." % len(list(groups.keys())))
             return
                     
         # If we get here, it's a new style file
@@ -1182,7 +1205,7 @@ def readgroups(silent=0):
             # Key/value pair?
             elif m2:
                 if (grpname == ""):
-                    print "WARNING: Expected a group name before '%s'" % line
+                    print("WARNING: Expected a group name before '%s'" % line)
                     continue
                 key = m2.group(1)
                 val = m2.group(2)
@@ -1192,7 +1215,7 @@ def readgroups(silent=0):
 
         f.close()
 
-    except IOError, ex:
+    except IOError as ex:
         if silent == 0:
             raise SystemExit("Could not read %s.  Maybe you're not subscribed to any groups yet." % GRPFILE)
         else:
@@ -1209,17 +1232,17 @@ def writegroups():
         #grpfile = os.path.expanduser("~/.newsdeliver.grp")
         f = open("%s.tmp" % GRPFILE, "w")
         f.write("<NewsDeliver %s>\n\n" % __version__)
-        for g in groups.keys():
+        for g in list(groups.keys()):
             f.write("[%s]\n" % g)
-            for k in groups[g].keys():
+            for k in list(groups[g].keys()):
                 if groups[g][k] != "":
                     f.write("%s=%s\n" % (k, groups[g][k]))
             f.write("\n")
         f.close()
         os.rename("%s.tmp" % GRPFILE, GRPFILE)
-    except IOError, ex:
+    except IOError as ex:
         raise SystemExit("Could not write %s: %s." % (GRPFILE, ex))
-    except Exception, ex:
+    except Exception as ex:
         raise SystemExit("Failed to replace %s: %s" % (GRPFILE, ex))
 
 
@@ -1243,7 +1266,7 @@ def clear_timeout():
     current_operation = "unknown"
     signal.alarm(0)
 
-class NDCriticalError(exceptions.Exception):
+class NDCriticalError(Exception):
     """ An exception that is thrown if something bad happens while we're
         sending newsgroup articles.  The catch block will save the number
         of messages that were successfully sent and then exit gracefully.
@@ -1298,11 +1321,13 @@ class NDSMTPError_Temporary(NDCriticalError_Single):
 # not exist, generate it automatically.
 try:
     f = open(os.path.expanduser("~/.newsdeliverrc"))
-    exec(f)
+    conf = f.read()
+    exec(conf)
+    f.close()
 except IOError:
-    print "Configuration file missing -- we'll create one now."
+    print("Configuration file missing -- we'll create one now.")
     do_newconf()
-    print "You may now re-run NewsDeliver."
+    print("You may now re-run NewsDeliver.")
     sys.exit(0)
 
 main()

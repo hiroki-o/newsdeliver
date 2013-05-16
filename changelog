@@ -1,3 +1,7 @@
+1.4.1-py3.1
+	- Adoption to Python3
+	- Supporting TLS for SMTP authoring
+
 1.4.1
     - A TIMEOUT option has been added to the .newsdeliverrc file which allows
       the user to specify their own timeouts for network operations.

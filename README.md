@@ -1,5 +1,7 @@
 NewsDeliver, A Simple NNTP to Email Gateway
+====
 Copyright (C) 2002-2005 by Matt Roper <matt@mattrope.com>
+
 
 Introduction
 ------------
