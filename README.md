@@ -2,8 +2,6 @@ NewsDeliver, A Simple NNTP to Email Gateway
 ====
 Copyright (C) 2002-2005 by Matt Roper <matt@mattrope.com>
 
-2013 modified by Hiroki Omae <pigeon6> for Python3 and NNTP_SSL support
-
 Introduction
 ------------
 NewsDeliver is intended for people who need to closely monitor a newsgroup
